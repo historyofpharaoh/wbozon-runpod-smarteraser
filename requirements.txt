@@ -1,13 +1,14 @@
+# Зависимости для RORem (SDXL-inpaint fine-tune) на Runpod Serverless.
+# Версии — те же что у rorem_standalone (минимумы из README), pinned для воспроизводимости билда.
 torch==2.1.2
 torchvision==0.16.2
-numpy==1.26.4
-scipy
-opencv-python
-pillow
-requests==2.32.3
 diffusers==0.30.0
 transformers==4.46.3
 accelerate==1.0.0
 safetensors==0.4.5
-runpod==1.7.0
 huggingface_hub==0.24.5
+numpy==1.26.4
+Pillow==10.4.0
+opencv-python==4.10.0.84
+requests==2.32.3
+runpod==1.7.0
