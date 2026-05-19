@@ -1,7 +1,9 @@
 # Зависимости для RORem (SDXL-inpaint fine-tune) на Runpod Serverless.
-# Версии — те же что у rorem_standalone (минимумы из README), pinned для воспроизводимости билда.
-torch==2.1.2
-torchvision==0.16.2
+# torch 2.5+ обязательно — нужны CUDA kernels для Blackwell GPU (RTX PRO 6000, sm_120),
+# которые Runpod может подсунуть как fallback на пиках. torch 2.1.2 их не знает →
+# RuntimeError: CUDA error: no kernel image is available for execution on the device.
+torch==2.5.1
+torchvision==0.20.1
 diffusers==0.30.0
 transformers==4.46.3
 accelerate==1.0.0
