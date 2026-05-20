@@ -18,7 +18,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TORCH_HOME=/cache/torch \
     PYTHONUNBUFFERED=1 \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
-    WEIGHTS_DIR=/weights
+    WEIGHTS_DIR=/weights \
+    CUDA_LAUNCH_BLOCKING=1
 
 # libgl1 + libglib2.0 — для opencv-python (Poisson blend)
 RUN apt-get update && apt-get install -y --no-install-recommends \

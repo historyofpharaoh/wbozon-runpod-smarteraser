@@ -60,10 +60,45 @@ RUNPOD_DOWNLOAD_TIMEOUT = 30  # сек на скачивание image/mask с S
 _pipe = None  # глобальный кэш pipeline
 
 
+def _diagnose_gpu() -> None:
+    """Печатает в stdout всё что знаем про железку — для Runpod Logs.
+    Помогает понять, почему упал worker (несовместимая GPU vs неправильный wheel)."""
+    import subprocess
+    try:
+        smi = subprocess.check_output(
+            ["nvidia-smi",
+             "--query-gpu=name,driver_version,compute_cap,memory.total",
+             "--format=csv,noheader"],
+            text=True, timeout=5,
+        ).strip()
+        print(f"[GPU] nvidia-smi: {smi}", flush=True)
+    except Exception as e:
+        print(f"[GPU] nvidia-smi failed: {e}", flush=True)
+    try:
+        print(f"[GPU] torch.version.cuda={torch.version.cuda}", flush=True)
+        print(f"[GPU] torch.__version__={torch.__version__}", flush=True)
+        if torch.cuda.is_available():
+            print(f"[GPU] device_name={torch.cuda.get_device_name(0)}", flush=True)
+            cap = torch.cuda.get_device_capability(0)
+            print(f"[GPU] compute_capability=sm_{cap[0]}{cap[1]}", flush=True)
+            # Микротест: одна простая операция на GPU. Падает рано с понятным сообщением,
+            # если CUDA kernels не подходят (вместо мутного traceback из SDXL pipeline).
+            x = torch.zeros(1, device="cuda")
+            _ = x + 1
+            torch.cuda.synchronize()
+            print(f"[GPU] preflight tensor op OK", flush=True)
+        else:
+            print(f"[GPU] CUDA not available!", flush=True)
+    except Exception as e:
+        print(f"[GPU] preflight FAILED: {type(e).__name__}: {e}", flush=True)
+        raise
+
+
 def _load_pipe() -> None:
     global _pipe
     if _pipe is not None:
         return
+    _diagnose_gpu()  # печатает GPU/driver info, бросает rано если CUDA сломан
     from diffusers import StableDiffusionXLInpaintPipeline, AutoencoderKL
 
     t0 = time.time()
