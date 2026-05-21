@@ -6,8 +6,14 @@
 # Poisson blend (cv2.seamlessClone NORMAL_CLONE поверх TELEA pre-fill).
 #
 # Контракт API (совпадает с тем что шлёт apps/api/src/services/runpodInpaint.ts):
-#   input:  { image_url, mask_url }
-#   output: { result_b64 }  # PNG base64
+#   input:  { image_url, mask_url, result_put_url }
+#   output: { ok: true, infer_s, peak_vram_gb, config }
+#
+# Почему так: Runpod serverless runtime молча выбрасывает поле `output` из HTTP-ответа
+# /status и /runsync, когда его сериализованный размер > ~2MB. Финальный inpaint-PNG
+# для фотореалистичных снимков 2-4K превышает этот лимит → клиент получал status=COMPLETED
+# без output ("Сервис ластика вернул пустой ответ"). Поэтому handler PUT'ит webp
+# напрямую в наш S3 по presigned URL, а через output отдаёт только короткий ack.
 #
 # Параметры RORem (НЕ менять — рекомендации авторов):
 #   guidance_scale = 1.0       (выше → галлюцинации)
@@ -16,8 +22,10 @@
 #   VAE = madebyollin/sdxl-vae-fp16-fix  (стоковый SDXL VAE в fp16 даёт color drift)
 #   HD_CROP margin=96, max_fraction=0.5
 #   Poisson: NORMAL_CLONE, ERODE=6, PAD=96, TELEA pre-fill, feather_px=0
+#
+# WebP: quality=99, method=4 — соответствует sharp().webp({quality:99}) в storage.ts
+# (поведение, которое раньше делал downloadAndStore у нас).
 
-import base64
 import io
 import os
 import time
@@ -56,6 +64,9 @@ FEATHER_PX = 0          # 0 = hard composite
 
 WEIGHTS_DIR = Path(os.environ.get("WEIGHTS_DIR", "/weights"))
 RUNPOD_DOWNLOAD_TIMEOUT = 30  # сек на скачивание image/mask с S3
+RESULT_PUT_TIMEOUT = 60       # сек на PUT результата в наш S3 по presigned URL
+WEBP_QUALITY = 99             # совпадает с sharp().webp({quality:99}) в apps/api/src/services/storage.ts
+WEBP_METHOD = 4               # 0-6, чем выше — тем плотнее жмёт ценой времени; 4 — баланс
 
 _pipe = None  # глобальный кэш pipeline
 
@@ -287,8 +298,13 @@ def handler(event):
     payload = (event or {}).get("input", {}) or {}
     image_url = payload.get("image_url")
     mask_url = payload.get("mask_url")
+    result_put_url = payload.get("result_put_url")
     if not image_url or not mask_url:
         return {"error": "image_url and mask_url required"}
+    if not result_put_url:
+        # Контракт: клиент обязан передать presigned PUT URL для результата.
+        # Через output большое тело не отдаём — Runpod runtime его срежет.
+        return {"error": "result_put_url required"}
 
     _load_pipe()  # no-op если уже загружено
 
@@ -320,12 +336,35 @@ def handler(event):
     peak_gb = torch.cuda.max_memory_allocated() / 1e9
     print(f"[RORem] infer={infer_s:.2f}s peak_VRAM={peak_gb:.2f}GB", flush=True)
 
+    # WebP вместо PNG: на типичных кропах 1024×768 даёт 200-700KB (vs PNG 3-10MB).
+    # Формат и параметры качества подобраны под sharp().webp({quality:99}) у нас на бэке.
     buf = io.BytesIO()
-    Image.fromarray(result).save(buf, format="PNG", optimize=False)
+    Image.fromarray(result).save(buf, format="WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD)
+    webp_bytes = buf.getvalue()
+    print(f"[RORem] webp size={len(webp_bytes)}b", flush=True)
+
+    # PUT в наш S3 по presigned URL. Content-Type обязан совпадать с тем, что
+    # бэк подписал — иначе подпись не сходится (Yandex S3 sigv4).
+    put_t0 = time.time()
+    try:
+        resp = requests.put(
+            result_put_url,
+            data=webp_bytes,
+            headers={"Content-Type": "image/webp"},
+            timeout=RESULT_PUT_TIMEOUT,
+        )
+    except Exception as e:
+        return {"error": f"Result upload failed: {e}"}
+    if resp.status_code < 200 or resp.status_code >= 300:
+        # Тело Yandex S3 на ошибке — XML, в логи попадает первая часть для разбора.
+        return {"error": f"Result upload HTTP {resp.status_code}: {resp.text[:300]}"}
+    put_s = time.time() - put_t0
+    print(f"[RORem] s3 PUT ok in {put_s:.2f}s", flush=True)
 
     return {
-        "result_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
+        "ok": True,
         "infer_s": round(infer_s, 2),
+        "put_s": round(put_s, 2),
         "peak_vram_gb": round(peak_gb, 2),
         "config": {
             "model": "rorem",
